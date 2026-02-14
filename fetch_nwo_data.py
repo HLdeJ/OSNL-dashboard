@@ -57,7 +57,10 @@ def extract_collaborations(projects):
     print("Extracting collaborations...")
 
     institution_projects = defaultdict(list)  # ror_id -> list of {id, title}
-    collaboration_pairs = defaultdict(int)
+    # collaboration_pairs now stores: {(ror1, ror2): {scheme: count, ...}}
+    collaboration_pairs = defaultdict(lambda: defaultdict(int))
+    funding_schemes = set()
+    all_projects_list = []  # All projects regardless of ROR
     projects_with_grant_id = 0
 
     for project in projects:
@@ -69,38 +72,41 @@ def extract_collaborations(projects):
             continue
 
         projects_with_grant_id += 1
+        funding_scheme = project.get("funding_scheme", "Unknown")
+        funding_schemes.add(funding_scheme)
+        project_info = {"grant_id": grant_id, "title": project_title[:60], "funding_scheme": funding_scheme}
+
+        # Add to all projects list
+        all_projects_list.append(project_info)
 
         # Get project members with ROR IDs
         members = project.get("project_members", project.get("projectMembers", []))
-        if not members:
-            continue
 
         # Extract unique ROR IDs from this project
         ror_ids = set()
-        for member in members:
-            ror = member.get("ror") or member.get("rorId") or member.get("institution_ror")
-            if ror and ror != "-" and "ror.org/" in ror:
-                # Clean ROR ID (ensure it's just the ID, not full URL)
-                ror = ror.split("ror.org/")[-1]
-                ror_ids.add(ror)
+        if members:
+            for member in members:
+                ror = member.get("ror") or member.get("rorId") or member.get("institution_ror")
+                if ror and ror != "-" and "ror.org/" in ror:
+                    ror = ror.split("ror.org/")[-1]
+                    ror_ids.add(ror)
 
-        # Store project info for each institution
-        project_info = {"grant_id": grant_id, "title": project_title[:60]}
+        # Store project info for each institution (if any ROR IDs found)
         for ror in ror_ids:
-            # Avoid duplicates
             if not any(p["grant_id"] == grant_id for p in institution_projects[ror]):
                 institution_projects[ror].append(project_info)
 
-        # Count collaboration pairs (projects with 2+ institutions)
+        # Count collaboration pairs by funding scheme (projects with 2+ institutions)
         if len(ror_ids) >= 2:
             for pair in combinations(sorted(ror_ids), 2):
-                collaboration_pairs[pair] += 1
+                collaboration_pairs[pair][funding_scheme] += 1
 
     print(f"  Found {projects_with_grant_id} projects with grant IDs")
-    print(f"  Found {len(institution_projects)} unique institutions")
+    print(f"  Found {len(institution_projects)} unique institutions with ROR")
     print(f"  Found {len(collaboration_pairs)} collaboration pairs")
+    print(f"  Found {len(funding_schemes)} funding schemes")
 
-    return institution_projects, collaboration_pairs
+    return institution_projects, collaboration_pairs, sorted(funding_schemes), all_projects_list
 
 def fetch_ror_data(ror_ids):
     """Fetch institution details from ROR API."""
@@ -166,7 +172,7 @@ def fetch_ror_data(ror_ids):
 
 def main():
     # Fetch NWO projects
-    projects = fetch_nwo_projects(limit=250, reporting_years=[2024, 2025])
+    projects = fetch_nwo_projects(limit=500, reporting_years=[2022, 2023, 2024, 2025])
 
     if not projects:
         print("No projects fetched. Please check the API connection.")
@@ -175,7 +181,7 @@ def main():
     print(f"Total projects fetched: {len(projects)}")
 
     # Extract collaborations
-    institution_projects, collaboration_pairs = extract_collaborations(projects)
+    institution_projects, collaboration_pairs, funding_schemes, all_projects_list = extract_collaborations(projects)
 
     if not institution_projects:
         print("No institutions with ROR IDs found in projects.")
@@ -203,24 +209,30 @@ def main():
 
     # Build collaboration links (top connections)
     output_links = []
-    for (ror1, ror2), count in sorted(collaboration_pairs.items(), key=lambda x: -x[1])[:50]:
+    # Sort by total count across all schemes
+    sorted_pairs = sorted(collaboration_pairs.items(), key=lambda x: -sum(x[1].values()))[:50]
+    for (ror1, ror2), scheme_counts in sorted_pairs:
         if ror1 in institutions and ror2 in institutions:
             inst1, inst2 = institutions[ror1], institutions[ror2]
             if all([inst1["lat"], inst1["lng"], inst2["lat"], inst2["lng"]]):
                 output_links.append({
                     "source": {"lat": inst1["lat"], "lng": inst1["lng"], "name": inst1["name"]},
                     "target": {"lat": inst2["lat"], "lng": inst2["lng"], "name": inst2["name"]},
-                    "count": count
+                    "count": sum(scheme_counts.values()),  # Total count
+                    "scheme_counts": dict(scheme_counts)   # Count per funding scheme
                 })
 
     # Write output
     output = {
         "institutions": output_institutions,
         "links": output_links,
+        "funding_schemes": funding_schemes,
+        "all_projects": all_projects_list,
         "metadata": {
-            "total_projects": len(projects),
+            "total_projects": len(all_projects_list),
             "total_institutions": len(output_institutions),
-            "total_links": len(output_links)
+            "total_links": len(output_links),
+            "total_funding_schemes": len(funding_schemes)
         }
     }
 
